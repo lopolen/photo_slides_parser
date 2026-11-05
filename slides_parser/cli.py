@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("-i", "--input", type=Path, default=Path("input"),
-                        help="Directory with slide images (default: input/).")
+                        help="Directory with slide images, or a single image file (default: input/).")
     parser.add_argument("-o", "--output", type=Path, default=Path("output.txt"),
                         help="Output text file (default: output.txt).")
     parser.add_argument("--regions", type=Path, default=None,
@@ -43,13 +43,17 @@ def settings_from_args(args: argparse.Namespace) -> OcrSettings:
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    input_dir: Path = args.input
-    if not input_dir.exists():
-        input_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Created '{input_dir}'. Put slide images there and run again.")
-        return 1
-
-    images = find_images(input_dir)
+    input_path: Path = args.input
+    if input_path.is_file():
+        # A single image: its regions (if any) live in regions.json next to it.
+        input_dir, images = input_path.parent, [input_path]
+    else:
+        input_dir = input_path
+        if not input_dir.exists():
+            input_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Created '{input_dir}'. Put slide images there and run again.")
+            return 1
+        images = find_images(input_dir)
     if not images:
         print(f"No images found in '{input_dir}'.")
         return 1
