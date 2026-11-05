@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QStyleOptionGraphicsItem, QWidget
@@ -10,6 +8,7 @@ from ..models import Region
 
 HANDLE_PX = 8       # grab distance for resize, in screen pixels
 MIN_SIZE = 8        # minimal region side, in image pixels
+BADGE_PX = 26       # number badge diameter, in screen pixels
 
 LEFT, TOP, RIGHT, BOTTOM = 1, 2, 4, 8
 
@@ -27,33 +26,6 @@ def color_for(number: int) -> QColor:
     return QColor.fromHsv(hue, 200, 230)
 
 
-class BadgeItem(QGraphicsItem):
-    """Region number drawn at a constant on-screen size, regardless of zoom."""
-
-    SIZE = 26
-
-    def __init__(self, parent: RegionItem):
-        super().__init__(parent)
-        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        self.setAcceptedMouseButtons(Qt.NoButton)
-        self.setAcceptHoverEvents(False)
-
-    def boundingRect(self) -> QRectF:
-        return QRectF(0, 0, self.SIZE, self.SIZE)
-
-    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None):
-        parent: RegionItem = self.parentItem()
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-        painter.setBrush(color_for(parent.number).darker(140))
-        painter.drawEllipse(self.boundingRect().adjusted(2, 2, -2, -2))
-        font = QFont()
-        font.setBold(True)
-        font.setPixelSize(13)
-        painter.setFont(font)
-        painter.drawText(self.boundingRect(), Qt.AlignCenter, str(parent.number))
-
-
 class RegionItem(QGraphicsRectItem):
     """Semi-transparent, numbered, movable and resizable rectangle.
 
@@ -61,11 +33,10 @@ class RegionItem(QGraphicsRectItem):
     coordinates and rect() is always QRectF(0, 0, w, h).
     """
 
-    def __init__(self, rect: QRectF, bounds: QRectF, number: int, on_changed: Callable[[], None]):
+    def __init__(self, rect: QRectF, bounds: QRectF, number: int):
         super().__init__(0, 0, rect.width(), rect.height())
         self.number = number
         self._bounds = bounds
-        self._on_changed = on_changed
         self._resize_edges = 0
         self._moved = False
         self.setPos(rect.topLeft())
@@ -76,7 +47,6 @@ class RegionItem(QGraphicsRectItem):
             | QGraphicsItem.ItemSendsGeometryChanges
         )
         self.setAcceptHoverEvents(True)
-        self.badge = BadgeItem(self)
 
     # --- model conversion -------------------------------------------------
     def scene_rect(self) -> QRectF:
@@ -89,7 +59,6 @@ class RegionItem(QGraphicsRectItem):
     def set_number(self, number: int) -> None:
         self.number = number
         self.update()
-        self.badge.update()
 
     # --- painting -----------------------------------------------------------
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None):
@@ -103,6 +72,31 @@ class RegionItem(QGraphicsRectItem):
         painter.setPen(pen)
         painter.setBrush(QBrush(fill))
         painter.drawRect(self.rect())
+        self._paint_badge(painter, color)
+
+    def _badge_rect(self) -> QRectF:
+        size = BADGE_PX / self._view_scale()
+        return QRectF(0, 0, size, size)
+
+    def boundingRect(self) -> QRectF:
+        # Include the number badge, which keeps a constant on-screen size.
+        return super().boundingRect().united(self._badge_rect())
+
+    def _paint_badge(self, painter: QPainter, color: QColor) -> None:
+        scale = self._view_scale()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.scale(1 / scale, 1 / scale)   # draw in screen pixels
+        box = QRectF(0, 0, BADGE_PX, BADGE_PX)
+        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+        painter.setBrush(color.darker(140))
+        painter.drawEllipse(box.adjusted(2, 2, -2, -2))
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(13)
+        painter.setFont(font)
+        painter.drawText(box, Qt.AlignCenter, str(self.number))
+        painter.restore()
 
     # --- helpers --------------------------------------------------------------
     def _view_scale(self) -> float:
@@ -189,4 +183,10 @@ class RegionItem(QGraphicsRectItem):
             super().mouseReleaseEvent(event)
         if self._moved:
             self._moved = False
-            self._on_changed()
+            # Notify through the scene instead of storing a callback: a reference back to
+            # the canvas creates a Python<->Qt cycle that crashes when collected at exit.
+            if self.scene() is not None:
+                for view in self.scene().views():
+                    notify = getattr(view, "region_edited", None)
+                    if notify is not None:
+                        notify()

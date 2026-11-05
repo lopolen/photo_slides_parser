@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Extract text from presentation slides saved as images.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "Without --cli the graphical region editor opens.\n"
             "Images are processed in natural filename order (1.jpg, 2.jpg, ..., 10.jpg).\n"
             f"If the input directory contains {LAYOUT_FILENAME} (created by the GUI), only the\n"
             "marked regions are read, in their numbered order. Otherwise the whole slide is read.\n"
@@ -32,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lang", default="ukr+eng", help="Tesseract languages (default: ukr+eng).")
     parser.add_argument("--psm", type=int, default=6, help="Tesseract page segmentation mode (default: 6).")
     parser.add_argument("--tesseract", default=None, help="Path to the tesseract executable.")
-    parser.add_argument("--gui", action="store_true", help="Open the graphical region editor.")
+    parser.add_argument("--cli", action="store_true",
+                        help="Run in the console without the GUI (by default the GUI region editor opens).")
     return parser
 
 
@@ -69,7 +71,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.gui:
+    if not args.cli:
         from .gui import run_gui
         return run_gui(input_dir=args.input, output=args.output, settings=settings_from_args(args))
     return run_cli(args)

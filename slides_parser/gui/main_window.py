@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         self.store: LayoutStore | None = None
         self.current = -1
         self._thread: QThread | None = None
+        self._worker: OcrWorker | None = None
         self._syncing = False
 
         self.canvas = SlideCanvas(self)
@@ -305,6 +306,9 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.progress.setVisible(True)
+        # Keep a Python reference: otherwise the worker is garbage-collected right after
+        # this method returns and the thread runs nothing (progress stuck at 0%).
+        self._worker = worker
         self._thread = start_worker(self, worker)
         self._thread.finished.connect(self._on_thread_finished)
         self._update_actions()
@@ -323,6 +327,7 @@ class MainWindow(QMainWindow):
 
     def _on_thread_finished(self) -> None:
         self._thread = None
+        self._worker = None
         self._update_actions()
 
     def _busy(self) -> bool:
@@ -346,4 +351,7 @@ class MainWindow(QMainWindow):
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(5000)
+        # Remove Python-subclassed graphics items while Qt is fully alive; leaving them
+        # for interpreter shutdown randomly crashes with an access violation.
+        self.canvas.clear_image()
         super().closeEvent(event)

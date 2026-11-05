@@ -27,6 +27,9 @@ class SlideCanvas(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
+        # Region bounding rects depend on zoom (the number badge has a fixed screen size),
+        # so a BSP index would go stale; with only a handful of items no index is needed.
+        self.scene().setItemIndexMethod(QGraphicsScene.NoIndex)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
@@ -50,11 +53,15 @@ class SlideCanvas(QGraphicsView):
 
     def set_image(self, pixmap: QPixmap, regions: list[Region]) -> None:
         self.scene().blockSignals(True)
-        self.scene().clear()
+        self._remove_all_regions()
         self.scene().blockSignals(False)
-        self._items = []
-        self._pixmap_item = self.scene().addPixmap(pixmap)
-        self._pixmap_item.setZValue(-1)
+        # Reuse one pixmap item instead of QGraphicsScene.clear(): clear() deletes the
+        # Python-subclassed region items on the C++ side and crashes (access violation).
+        if self._pixmap_item is None:
+            self._pixmap_item = self.scene().addPixmap(pixmap)
+            self._pixmap_item.setZValue(-1)
+        else:
+            self._pixmap_item.setPixmap(pixmap)
         self._bounds = QRectF(pixmap.rect())
         self.scene().setSceneRect(self._bounds)
         for region in regions:
@@ -63,17 +70,27 @@ class SlideCanvas(QGraphicsView):
         self.selectedIndexChanged.emit(-1)
 
     def clear_image(self) -> None:
-        self.scene().clear()
-        self._items = []
-        self._pixmap_item = None
+        self._remove_all_regions()
+        if self._pixmap_item is not None:
+            self.scene().removeItem(self._pixmap_item)
+            self._pixmap_item = None
 
     def regions(self) -> list[Region]:
         return [item.to_region() for item in self._items]
 
-    def set_regions(self, regions: list[Region]) -> None:
+    def _remove_all_regions(self) -> None:
+        if self._draw_preview is not None:
+            self.scene().removeItem(self._draw_preview)
+            self._draw_preview = None
+            self._draw_origin = None
         for item in self._items:
+            item.setSelected(False)
+            item.clearFocus()
             self.scene().removeItem(item)
         self._items = []
+
+    def set_regions(self, regions: list[Region]) -> None:
+        self._remove_all_regions()
         for region in regions:
             self._add_item(QRectF(region.x, region.y, region.w, region.h))
         self.regionsChanged.emit()
@@ -131,10 +148,14 @@ class SlideCanvas(QGraphicsView):
 
     # --- internals ------------------------------------------------------------
     def _add_item(self, rect: QRectF) -> RegionItem:
-        item = RegionItem(rect, self._bounds, len(self._items) + 1, self.regionsChanged.emit)
+        item = RegionItem(rect, self._bounds, len(self._items) + 1)
         self.scene().addItem(item)
         self._items.append(item)
         return item
+
+    def region_edited(self) -> None:
+        """Called by a RegionItem after the user moved or resized it."""
+        self.regionsChanged.emit()
 
     def _renumber(self) -> None:
         for number, item in enumerate(self._items, start=1):
