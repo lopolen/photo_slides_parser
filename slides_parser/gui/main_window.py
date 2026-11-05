@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QDockWidget, QFileDialog, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QSplitter, QToolBar, QVBoxLayout, QWidget,
 )
 
-from ..images import find_images
+from ..images import IMAGE_EXTENSIONS, find_images, natural_key
 from ..layout_store import LayoutStore
 from ..models import SlideText
 from ..ocr import OcrSettings
@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
         self.current = -1
         self._thread: QThread | None = None
         self._worker: OcrWorker | None = None
+        self._last_text = ""  # recognized text without block headers, for copying
         self._syncing = False
 
         self.canvas = SlideCanvas(self)
@@ -49,6 +50,8 @@ class MainWindow(QMainWindow):
 
         if input_dir.is_dir():
             self.open_folder(input_dir)
+        elif input_dir.is_file():
+            self.open_files([input_dir])
         self._update_actions()
 
     # --- UI construction --------------------------------------------------
@@ -114,6 +117,10 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self) -> None:
         self.a_open = self._action("Відкрити папку…", self.choose_folder, QKeySequence.Open)
+        self.a_open_file = self._action("Відкрити файл…", self.choose_files, "Ctrl+Shift+O",
+                                        "Відкрити одне або кілька зображень")
+        self.a_copy_text = self._action("Копіювати текст", self.copy_text, "Ctrl+Shift+C",
+                                        "Скопіювати розпізнаний текст у буфер обміну")
         self.a_prev = self._action("◀ Попередній", lambda: self._step(-1), Qt.Key_PageUp)
         self.a_next = self._action("Наступний ▶", lambda: self._step(1), Qt.Key_PageDown)
         self.a_fit = self._action("Вмістити", self.canvas.fit, "Ctrl+0", "Масштаб під розмір вікна")
@@ -131,8 +138,9 @@ class MainWindow(QMainWindow):
         toolbar.setObjectName("tools")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        for item in (self.a_open, None, self.a_prev, self.a_next, None, self.a_zoom_out, self.a_fit,
-                     self.a_zoom_in, None, self.a_copy_prev, self.a_clear, None, self.a_preview, self.a_extract):
+        for item in (self.a_open, self.a_open_file, None, self.a_prev, self.a_next, None,
+                     self.a_zoom_out, self.a_fit, self.a_zoom_in, None, self.a_copy_prev, self.a_clear, None,
+                     self.a_preview, self.a_copy_text, self.a_extract):
             toolbar.addSeparator() if item is None else toolbar.addAction(item)
         self.addToolBar(toolbar)
 
@@ -149,7 +157,28 @@ class MainWindow(QMainWindow):
         if folder:
             self.open_folder(Path(folder))
 
+    def choose_files(self) -> None:
+        start = str(self.input_dir or Path.cwd())
+        patterns = " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS)
+        files, _ = QFileDialog.getOpenFileNames(self, "Відкрити зображення", start,
+                                                f"Зображення ({patterns});;Усі файли (*)")
+        if files:
+            self.open_files([Path(f) for f in files])
+
     def open_folder(self, folder: Path) -> None:
+        self._load(folder, find_images(folder), str(folder))
+
+    def open_files(self, files: list[Path]) -> None:
+        """Open only the given images (all from one folder, as a file dialog returns them).
+
+        Their regions are still stored in that folder's regions.json, so a layout drawn
+        here is also used when the whole folder is processed later.
+        """
+        files = sorted(files, key=lambda p: natural_key(p.name))
+        title = str(files[0]) if len(files) == 1 else f"{files[0].parent}  ({len(files)} файли)"
+        self._load(files[0].parent, files, title)
+
+    def _load(self, folder: Path, images: list[Path], title: str) -> None:
         try:
             store = LayoutStore.for_directory(folder)
         except (OSError, ValueError, KeyError) as exc:
@@ -157,9 +186,9 @@ class MainWindow(QMainWindow):
             return
         self.input_dir = folder
         self.store = store
-        self.images = find_images(folder)
+        self.images = images
         self.current = -1
-        self.setWindowTitle(f"Photo Slides Parser — {folder}")
+        self.setWindowTitle(f"Photo Slides Parser — {title}")
 
         self.slide_list.blockSignals(True)
         self.slide_list.clear()
@@ -187,7 +216,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Помилка", f"Не вдалося відкрити {path.name}")
             return
         self.canvas.set_image(pixmap, self.store.get(path.name))
-        self.preview.clear()
+        self._set_result("", "")
         self._refresh_region_list()
         self.statusBar().showMessage(f"{path.name}  —  {pixmap.width()}×{pixmap.height()}")
         self._update_actions()
@@ -271,10 +300,21 @@ class MainWindow(QMainWindow):
             return
         slide = results[0]
         if len(slide.blocks) == 1:
-            self.preview.setPlainText(slide.blocks[0])
-            return
-        parts = [f"── Блок {i} ──\n{text}" for i, text in enumerate(slide.blocks, start=1)]
-        self.preview.setPlainText("\n\n".join(parts))
+            shown = slide.blocks[0]
+        else:
+            shown = "\n\n".join(f"── Блок {i} ──\n{text}" for i, text in enumerate(slide.blocks, start=1))
+        self._set_result(shown, slide.text)
+        self.statusBar().showMessage("Готово. Ctrl+Shift+C — скопіювати текст")
+
+    def _set_result(self, shown: str, clean: str) -> None:
+        self.preview.setPlainText(shown)
+        self._last_text = clean
+        self._update_actions()
+
+    def copy_text(self) -> None:
+        if self._last_text:
+            QGuiApplication.clipboard().setText(self._last_text)
+            self.statusBar().showMessage("Текст скопійовано в буфер обміну")
 
     def extract_all(self) -> None:
         if not self.images or self._busy():
@@ -293,7 +333,8 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Помилка", f"Не вдалося записати {self.output}:\n{exc}")
             return
-        self.preview.setPlainText("\n\n".join(s.text for s in results))
+        combined = "\n\n".join(s.text for s in results)
+        self._set_result(combined, combined)
         self.statusBar().showMessage(f"Конспект збережено: {self.output}")
         QMessageBox.information(self, "Готово", f"Текст {len(results)} слайдів збережено у\n{self.output}")
 
@@ -346,6 +387,8 @@ class MainWindow(QMainWindow):
         self.a_preview.setEnabled(has_slide and not busy)
         self.a_extract.setEnabled(bool(self.images) and not busy)
         self.a_open.setEnabled(not busy)
+        self.a_open_file.setEnabled(not busy)
+        self.a_copy_text.setEnabled(bool(self._last_text))
 
     def closeEvent(self, event):
         if self._thread is not None:
