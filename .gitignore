@@ -2,3 +2,4 @@
 /input
 output.txt
 /output
+*.pyc
